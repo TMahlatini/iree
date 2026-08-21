@@ -75,7 +75,8 @@ Codegen::TileSwizzle getSwizzle(DataTiledMMAAttr mma, int operandIdx);
 // treated as its 128-bit minimum — a deliberate simplification that produces
 // good-enough `intrinsics_m`/`intrinsics_n` choices without leaking
 // scalability into the cost model.
-// Values: AVX/AVX2 = 16 × 32 B, AVX-512 = 32 × 64 B, SVE/SVE2 = 32 × 16 B.
+// Values: AVX/AVX2 = 16 × 32 B, AVX-512 = 32 × 64 B, SVE/SVE2 = 32 × 16 B,
+// RVV VLEN=256 = 32 × 32 B.
 int64_t getRegisterSpaceBytes(MMAIntrinsic intrinsic);
 
 // True if `intr` is one of the `MMA_GENERIC_SCALAR_1x1x1_REG*` cases.

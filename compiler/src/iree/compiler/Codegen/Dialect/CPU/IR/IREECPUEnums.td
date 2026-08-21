@@ -83,6 +83,8 @@ class IREECPU_I32EnumAttr<string name, string summary,
 //     - 1 is NEON.
 //     - 2 is SVE/SVE2.
 //     - 3 is SME/SME2.
+//   - For RISC-V:
+//     - 1 is V (vector). MxNxK is for a fixed VLEN.
 // * C denotes the element type of the A-matrix (LHS):
 //   * 0 = float64 (IEEE754 half precision).
 //   * 1 = float32 (IEEE754 half precision).
@@ -172,6 +174,12 @@ def MMA_ARM_SVE_FMLA_1x4VLx1_F32_F32
 def MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32
     : I32EnumAttrCase<"MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32", 0x2211>;
 
+// RISC-V V, VLEN=256: 32 f32 lanes, `vfmacc.vf`. Unrolling is `intrinsics_m`.
+def MMA_RISCV_V_1x32x1_F32_F32
+    : I32EnumAttrCase<"MMA_RISCV_V_1x32x1_F32_F32", 0x3110>;
+def MMA_RISCV_V_32x1x1_F32_F32
+    : I32EnumAttrCase<"MMA_RISCV_V_32x1x1_F32_F32", 0x3111>;
+
 // Architecture-agnostic, type-polymorphic generic-scalar fallback. Tile
 // shape is 1×1×1, lowering is a single `vector.contract` over the
 // unrolled (`intrinsics_m`, `intrinsics_n`, `intrinsics_k`) tile. Unlike
@@ -219,6 +227,9 @@ def IREECPU_MMAIntrinsic
 
            // Arm SVE
            MMA_ARM_SVE_FMLA_1x4VLx1_F32_F32, MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32,
+
+           // RISC-V V (VLEN=256)
+           MMA_RISCV_V_1x32x1_F32_F32, MMA_RISCV_V_32x1x1_F32_F32,
 
            // Architecture-agnostic generic-scalar fallback (type-polymorphic).
            MMA_GENERIC_SCALAR_1x1x1_REG8, MMA_GENERIC_SCALAR_1x1x1_REG16]>;

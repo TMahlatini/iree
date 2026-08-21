@@ -385,6 +385,10 @@ getMmaIntrinsicRequiredFeatures(IREE::CPU::MMAIntrinsic intr) {
   case MMAIntrinsic::MMA_X86_AVX512VNNI_16x1x4_I32_I8_UI8:
   case MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16:
     return {"+avx512vnni"};
+  // RISC-V V (VLEN=256)
+  case MMAIntrinsic::MMA_RISCV_V_1x32x1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_32x1x1_F32_F32:
+    return {"+v", "+zvl256b"};
   default:
     return {};
   }
@@ -543,6 +547,23 @@ getMmaIntrinsicsForTargetConfig(DictionaryAttr config) {
         MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16,
     };
     for (MMAIntrinsic intr : kAllX86) {
+      SmallVector<StringRef> required = getMmaIntrinsicRequiredFeatures(intr);
+      if (required.empty()) {
+        continue;
+      }
+      if (llvm::all_of(required,
+                       [&](StringRef f) { return hasFeature(config, f); })) {
+        out.push_back(intr);
+      }
+    }
+  }
+  // Requires +v and +zvl256b. hasFeature is exact-token match.
+  if (isRISCV64(config)) {
+    static const MMAIntrinsic kAllRiscv[] = {
+        MMAIntrinsic::MMA_RISCV_V_1x32x1_F32_F32,
+        MMAIntrinsic::MMA_RISCV_V_32x1x1_F32_F32,
+    };
+    for (MMAIntrinsic intr : kAllRiscv) {
       SmallVector<StringRef> required = getMmaIntrinsicRequiredFeatures(intr);
       if (required.empty()) {
         continue;
@@ -1598,8 +1619,7 @@ struct CPUEncodingPackedLayoutMaterializerAttr
 
     DictionaryAttr config = layoutAttr.getConfiguration();
     if (getEnableInnerTiledFromConfig(config)) {
-      return getInnerTiledEncodingInfo(type.getContext(), encoding, *cDims,
-                                       config);
+      return getInnerTiledEncodingInfo(type.getContext(), encoding, config);
     }
     return getMmt4dEncodingInfo(encoding, *cDims, config);
   }
@@ -1666,9 +1686,13 @@ private:
   /// packed-layout tile shape from it. No narrow-N transpose: unlike the
   /// legacy mmt4d path, the inner_tiled lowering handles narrow dims natively
   /// via `intrinsics_m` / `intrinsics_n`.
-  static MaterializeEncodingInfo getInnerTiledEncodingInfo(
-      MLIRContext *ctx, IREE::Encoding::EncodingAttr encoding,
-      const linalg::ContractionDimensions &cDims, DictionaryAttr config) {
+  ///
+  /// inner_tiled pack tiles are static (RVV N=32). Do not copy mmt4d
+  /// scalableTiles.
+  static MaterializeEncodingInfo
+  getInnerTiledEncodingInfo(MLIRContext *ctx,
+                            IREE::Encoding::EncodingAttr encoding,
+                            DictionaryAttr config) {
     MaterializeEncodingInfo info;
     IREE::CPU::DataTiledMMAAttr mma =
         chooseCpuInnerTiledMmaForEncoding(ctx, encoding, config);
@@ -1681,11 +1705,6 @@ private:
       return info;
     }
     info = std::move(maybeEncodingInfo.value());
-    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
-        getScalableTileFlags(cDims, encoding, config);
-    if (succeeded(scalableFlags)) {
-      info.scalableTiles = std::move(scalableFlags);
-    }
     // Attach the per-operand swizzle so the pack pipeline's
     // `getSwizzledShape` applies the `expand_shape` + `transpose` to the
     // inner tile, matching the permutation-aware tile type that
