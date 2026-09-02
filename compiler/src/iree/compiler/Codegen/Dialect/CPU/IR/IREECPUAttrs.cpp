@@ -485,12 +485,15 @@ getIntrinsicMNKShape(MMAIntrinsic intrinsic, int64_t vlen) {
     return Tuple{1, 4, 1};
   case MMAIntrinsic::MMA_ARM_SVE_FMLA_4VLx1x1_F32_F32:
     return Tuple{4, 1, 1};
-  // VLs = vlen / 8 lanes, one LMUL=2 register group at 16-bit elements.
+  // RVV: M or N is vlen/8. Enum bit 0 is the swapped orientation.
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32:
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16:
-  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16: {
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32: {
     int64_t vl = vlen / 8;
-    bool transposed =
-        intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16;
+    bool transposed = (static_cast<uint32_t>(intrinsic) & 1) != 0;
     return transposed ? Tuple{vl, 1, 1} : Tuple{1, vl, 1};
   }
   default:
@@ -737,9 +740,13 @@ std::tuple<Type, Type, Type> getABCElementTypes(MLIRContext *ctx,
     return {f64, f64, f64};
   case MMAIntrinsic::MMA_X86_AVX512_1x16x1_F32_F32:
   case MMAIntrinsic::MMA_X86_AVX512_16x1x1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32:
     return {f32, f32, f32};
   case MMAIntrinsic::MMA_X86_AVX512_1x16x1_F32_F16_CASTF32:
   case MMAIntrinsic::MMA_X86_AVX512_16x1x1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32:
     return {f16, f16, f32};
   case MMAIntrinsic::MMA_X86_AVX512FP16_1x32x1_F16_F16:
   case MMAIntrinsic::MMA_X86_AVX512FP16_32x1x1_F16_F16:
@@ -962,16 +969,84 @@ static Value lowerX86Avx512Vnni16x16x2I8(OpBuilder &b, Location loc, Value lhs,
   return result;
 }
 
+// vfmacc.vf. Scalar vs vector operand follows enum bit 0 (swapped => RHS
+// is scalar). ISel wants nxv8<elt> (f32m4 / f16m2); vl is vlen/8.
+static Value lowerRiscvVFmaccVf(OpBuilder &b, Location loc,
+                                MMAIntrinsic intrinsic, int64_t vlen,
+                                Value lhs, Value rhs, Value acc) {
+  bool lhsIsScalar = (static_cast<uint32_t>(intrinsic) & 1) == 0;
+  Value scalarSrc = lhsIsScalar ? lhs : rhs;
+  Value vec = lhsIsScalar ? rhs : lhs;
+
+  auto flattenIfNeeded = [&](Value v) -> Value {
+    auto vt = dyn_cast<VectorType>(v.getType());
+    if (!vt || vt.getRank() <= 1) {
+      return v;
+    }
+    return vector::ShapeCastOp::create(
+        b, loc, VectorType::get({vt.getNumElements()}, vt.getElementType()), v);
+  };
+  vec = flattenIfNeeded(vec);
+  acc = flattenIfNeeded(acc);
+  scalarSrc = flattenIfNeeded(scalarSrc);
+
+  auto scalarTy = cast<VectorType>(scalarSrc.getType());
+  SmallVector<int64_t> zeros(scalarTy.getRank(), 0);
+  Value scalar = vector::ExtractOp::create(b, loc, scalarSrc, zeros);
+
+  auto fixedTy = cast<VectorType>(acc.getType());
+  auto scalableTy = VectorType::get({8}, fixedTy.getElementType(), {true});
+  Value pad = vector::BroadcastOp::create(
+      b, loc, scalableTy,
+      arith::ConstantOp::create(b, loc,
+                                b.getZeroAttr(fixedTy.getElementType())));
+  Value accScalable =
+      vector::ScalableInsertOp::create(b, loc, acc, pad, /*pos=*/0);
+  Value vecScalable =
+      vector::ScalableInsertOp::create(b, loc, vec, pad, /*pos=*/0);
+
+  int64_t lanes = vlen / 8;
+  Value frm = arith::ConstantOp::create(b, loc, b.getI64IntegerAttr(7)); // DYN
+  Value vl = arith::ConstantOp::create(b, loc, b.getI64IntegerAttr(lanes));
+  // Tail undisturbed.
+  Value policy = arith::ConstantOp::create(b, loc, b.getI64IntegerAttr(0));
+  Value resultScalable =
+      LLVM::CallIntrinsicOp::create(
+          b, loc, scalableTy, b.getStringAttr("llvm.riscv.vfmacc"),
+          ValueRange{accScalable, scalar, vecScalable, frm, vl, policy})
+          .getResult(0);
+  return vector::ScalableExtractOp::create(b, loc, fixedTy, resultScalable,
+                                           /*pos=*/0);
+}
+
 // Lowers a MMAIntrinsic to a llvm.call_intrinsic op, plus any necessary
 // additional ops (potentially broadcasting or widening LHS/RHS or creating an
 // add op if the intrinsic isn't already adding the accumulator).
 static Value createCpuMmaIntrinsicCall(OpBuilder &builder, Location loc,
                                        MMAIntrinsic intrinsic, Value lhs,
-                                       Value rhs, Value acc) {
+                                       Value rhs, Value acc, int64_t vlen) {
   // The 16x16x2 i8 intrinsic processes whole panels and has its own widen /
   // shuffle scheme; it bypasses the per-row widen + broadcast path below.
   if (intrinsic == MMAIntrinsic::MMA_X86_AVX512VNNI_16x16x2_I32_I8_CASTI16) {
     return lowerX86Avx512Vnni16x16x2I8(builder, loc, lhs, rhs, acc);
+  }
+  // RVV vfmacc.vf; vl from vlen.
+  if (intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F32 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16) {
+    return lowerRiscvVFmaccVf(builder, loc, intrinsic, vlen, lhs, rhs, acc);
+  }
+  if (intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32) {
+    Type f32 = builder.getF32Type();
+    auto widenF16 = [&](Value v) -> Value {
+      auto vt = cast<VectorType>(v.getType());
+      return arith::ExtFOp::create(builder, loc,
+                                   VectorType::get(vt.getShape(), f32), v);
+    };
+    return lowerRiscvVFmaccVf(builder, loc, intrinsic, vlen, widenF16(lhs),
+                              widenF16(rhs), acc);
   }
   // Sign-/float-extend a vector to a wider element type. Used by the
   // *_CASTF32 (f16 → f32) and *_CASTI16 (i8 → i16) variants where the
@@ -1253,7 +1328,8 @@ LogicalResult DataTiledMMAAttr::buildUnderlyingOperations(
   }
   auto emitIntrinsic = [&](OpBuilder &b, Location loc, Value lhs, Value rhs,
                            Value acc) -> Value {
-    return createCpuMmaIntrinsicCall(b, loc, intrinsic, lhs, rhs, acc);
+    return createCpuMmaIntrinsicCall(b, loc, intrinsic, lhs, rhs, acc,
+                                     getVlen());
   };
   return Codegen::buildDataTiledMMAUnderlyingOperations(
       builder, loc, getSwizzle(*this, /*operandIdx=*/0),
