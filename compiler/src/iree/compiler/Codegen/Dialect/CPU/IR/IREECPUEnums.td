@@ -191,6 +191,13 @@ def MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16
 def MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16
     : I32EnumAttrCase<"MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16", 0x3121>;
 
+// f16→f32: extf then f32 vfmacc.vf (LMUL=4). Requires +zvfhmin (implied by
+// +zvfh). Native Zvfh f16 ACC still matches f16f16f16 encodings first.
+def MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32
+    : I32EnumAttrCase<"MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32", 0x3122>;
+def MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32
+    : I32EnumAttrCase<"MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32", 0x3123>;
+
 // Architecture-agnostic, type-polymorphic generic-scalar fallback. Tile
 // shape is 1×1×1, lowering is a single `vector.contract` over the
 // unrolled (`intrinsics_m`, `intrinsics_n`, `intrinsics_k`) tile. Unlike
@@ -244,6 +251,8 @@ def IREECPU_MMAIntrinsic
            MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32,
            MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16,
            MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16,
+           MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32,
+           MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32,
 
            // Architecture-agnostic generic-scalar fallback (type-polymorphic).
            MMA_GENERIC_SCALAR_1x1x1_REG8, MMA_GENERIC_SCALAR_1x1x1_REG16]>;

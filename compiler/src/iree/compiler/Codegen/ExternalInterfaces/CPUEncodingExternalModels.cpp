@@ -438,6 +438,9 @@ getMmaIntrinsicRequiredFeatures(IREE::CPU::MMAIntrinsic intr) {
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16:
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16:
     return {"+v", "+zvfh"};
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32:
+    return {"+v", "+zvfhmin"};
   default:
     return {};
   }
@@ -569,8 +572,13 @@ checkIntrinsicRequiredFeatures(DictionaryAttr config,
     if (required.empty()) {
       continue;
     }
-    if (llvm::all_of(required,
-                     [&](StringRef f) { return hasFeature(config, f); })) {
+    if (llvm::all_of(required, [&](StringRef f) {
+          if (hasFeature(config, f)) {
+            return true;
+          }
+          // Zvfh includes Zvfhmin; IREE matches feature strings exactly.
+          return f == "+zvfhmin" && hasFeature(config, "+zvfh");
+        })) {
       out.push_back(intr);
     }
   }
@@ -624,6 +632,8 @@ getMmaIntrinsicsForTargetConfig(DictionaryAttr config) {
         MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32,
         MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16,
         MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16,
+        MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32,
+        MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32,
     };
     checkIntrinsicRequiredFeatures(config, kAllRiscvV, out);
   }

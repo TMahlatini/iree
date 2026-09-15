@@ -489,7 +489,9 @@ getIntrinsicMNKShape(MMAIntrinsic intrinsic, int64_t vlen) {
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F32:
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32:
   case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16:
-  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16: {
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32: {
     int64_t vl = vlen / 8;
     bool transposed = (static_cast<uint32_t>(intrinsic) & 1) != 0;
     return transposed ? Tuple{vl, 1, 1} : Tuple{1, vl, 1};
@@ -743,6 +745,8 @@ std::tuple<Type, Type, Type> getABCElementTypes(MLIRContext *ctx,
     return {f32, f32, f32};
   case MMAIntrinsic::MMA_X86_AVX512_1x16x1_F32_F16_CASTF32:
   case MMAIntrinsic::MMA_X86_AVX512_16x1x1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32:
+  case MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32:
     return {f16, f16, f32};
   case MMAIntrinsic::MMA_X86_AVX512FP16_1x32x1_F16_F16:
   case MMAIntrinsic::MMA_X86_AVX512FP16_32x1x1_F16_F16:
@@ -1032,9 +1036,22 @@ static Value createCpuMmaIntrinsicCall(OpBuilder &builder, Location loc,
     return lowerX86Avx512Vnni16x16x2I8(builder, loc, lhs, rhs, acc);
   }
   if (intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F32 ||
-      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32) {
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F32 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F16_F16 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F16_F16) {
     return lowerRiscvVFmaccLike(builder, loc, intrinsic, vlen, lhs, rhs, acc,
                                 "llvm.riscv.vfmacc");
+  }
+  if (intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_1x8VLsx1_F32_F16_CASTF32 ||
+      intrinsic == MMAIntrinsic::MMA_RISCV_V_VFMACC_8VLsx1x1_F32_F16_CASTF32) {
+    Type f32 = builder.getF32Type();
+    auto widenF16 = [&](Value v) -> Value {
+      auto vt = cast<VectorType>(v.getType());
+      return arith::ExtFOp::create(builder, loc,
+                                   VectorType::get(vt.getShape(), f32), v);
+    };
+    return lowerRiscvVFmaccLike(builder, loc, intrinsic, vlen, widenF16(lhs),
+                                widenF16(rhs), acc, "llvm.riscv.vfmacc");
   }
   // Sign-/float-extend a vector to a wider element type. Used by the
   // *_CASTF32 (f16 → f32) and *_CASTI16 (i8 → i16) variants where the
